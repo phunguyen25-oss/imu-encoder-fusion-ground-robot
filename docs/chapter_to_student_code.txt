@@ -1,0 +1,72 @@
+FLOW LY THUYET -> CODE SENSOR FUSION BAN SINH VIEN
+=================================================
+
+Chuong 1: Bayes/Kalman, predict va update
+  Code: tilt_predict() -> tilt_update().
+
+Chuong 2: Bieu dien orientation
+  Code: roll/pitch/yaw Euler de de hoc. wrap_pi() giu goc trong [-pi, pi].
+  Dieu kien: robot mat dat, pitch khong tien gan +-90 do.
+
+Chuong 3: Observability
+  Code: roll/pitch duoc accel neo lai; yaw chi tich phan gyro.
+  Ket luan: yaw van drift neu khong co magnetometer/camera/GNSS/moc ngoai.
+
+Chuong 4: IMU va lay mau
+  Code: decode_mpu6050(), DLPF, TIM2 200 Hz, I2C DMA trong file main snippet.
+
+Chuong 5: Calibration
+  Code: calibration_step(); accel bias/scale nam trong SFStudent_Config_t.
+  Encoder radius/CPR/sign duoc gan trong USER CODE 2.
+
+Chuong 6: Mo hinh nhieu va discretization
+  Code: Qd co cac thanh phan dt, dt^2, dt^3 trong tilt_predict(); R cua accel.
+
+Chuong 7: Innovation va NIS
+  Code: innovation, S, NIS trong tilt_update(); xuat nis_roll/nis_pitch.
+
+Chuong 8: Robust/adaptive filtering
+  Code: R tang khi ||a|| lech g; NIS gate loai mau bat thuong.
+
+Chuong 9: Kien truc da tang
+  Code: attitude EKF chay truoc, sau do odometry_update() dung yaw gyro.
+
+Chuong 10: Timestamp va dong bo
+  Code: TIM2 chup cung luc timestamp + 2 encoder; dt tinh tu DWT.
+
+Chuong 11: He truc toa do
+  Code: axis_index[], axis_sign[], map_sensor_to_body().
+
+Chuong 12: Fusion IMU + encoder
+  Code: encoder cho ds; delta-yaw gyro va encoder duoc fusion vo huong bang NIS;
+        sau do cap nhat x,y tai heading_mid. Neu banh truot, tam thoi tin gyro.
+
+Chuong 13: Trien khai nhung an toan
+  Code: float32, DMA, ISR ngan, deadline counter, dt guard, covariance guard,
+        stale-data watchdog va khong printf blocking trong loop 200 Hz.
+
+Chuong 16: Error-State Kalman Filter
+  Code: moi TiltKF co [angle, gyro_bias]; gyro predict sai so, accel update
+        va inject vao angle/bias. Day la ESKF rut gon dung cho robot mat dat.
+  Khong dung ESKF 15 state vi MPU6050 + wheel encoder khong quan sat du cac state.
+
+Chuong 17: Odometry vi sai va covariance
+  Code: int16 counter delta chong wrap, midpoint integration,
+        P = FPF' + GQG', nhieu tang theo |ds| va |dtheta|.
+
+
+FLOW CHAY MOI CHU KY 5 ms
+=======================
+TIM2 ISR chup timestamp + encoder
+  -> main khoi dong I2C DMA
+  -> DMA callback bao mau san sang
+  -> doi raw MPU6050 sang don vi SI
+  -> neu chua du 400 mau: calibration gyro
+  -> predict roll va pitch bang gyro
+  -> tinh goc roll/pitch tu accel
+  -> kiem tra NIS va adaptive R
+  -> update hai Tilt KF
+  -> tich phan gyro Z thanh yaw
+  -> doi encoder count thanh quang duong hai banh
+  -> cap nhat x, y, distance, speed va covariance
+  -> kiem tra fault; chi watchdog khi du lieu con moi.

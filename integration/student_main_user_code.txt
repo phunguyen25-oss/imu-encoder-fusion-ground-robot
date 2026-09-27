@@ -1,0 +1,245 @@
+CAC DOAN CHI COPY VAO CAC VUNG USER CODE CUA main.c
+===================================================
+
+Gia su CubeMX da tao:
+  - hi2c1 va DMA RX cho I2C1
+  - htim2: Base Timer 200 Hz, co interrupt
+  - htim3: Encoder Mode cho banh trai
+  - htim4: Encoder Mode cho banh phai
+  - hiwdg: watchdog (neu dung)
+
+Khong copy cac ham MX_...Init(); CubeMX tu sinh cac ham do.
+
+
+1) DAN VAO /* USER CODE BEGIN Includes */
+-----------------------------------------
+#include "sensor_fusion_student.h"
+
+
+2) DAN VAO /* USER CODE BEGIN PD */
+-----------------------------------
+#define MPU6050_ADDR       (0x68U << 1)
+#define MPU6050_WHO_AM_I   0x75U
+#define MPU6050_PWR_MGMT_1 0x6BU
+#define MPU6050_SMPLRT_DIV 0x19U
+#define MPU6050_CONFIG     0x1AU
+#define MPU6050_GYRO_CFG   0x1BU
+#define MPU6050_ACCEL_CFG  0x1CU
+#define MPU6050_DATA_START 0x3BU
+
+
+3) DAN VAO /* USER CODE BEGIN PV */
+-----------------------------------
+/* Chuong 4, 10, 13: buffer DMA, timestamp, co bao va bo dem loi. */
+static SFStudent_Config_t sf_config;
+static SFStudent_Output_t sf_output;
+static uint8_t mpu6050_rx[14];
+
+static volatile uint8_t sample_tick_pending = 0U;
+static volatile uint8_t i2c_dma_busy = 0U;
+static volatile uint8_t imu_sample_ready = 0U;
+static volatile uint32_t sample_timestamp_us = 0U;
+static volatile uint16_t encoder_left_snapshot = 0U;
+static volatile uint16_t encoder_right_snapshot = 0U;
+static volatile uint32_t deadline_miss_count = 0U;
+static volatile uint32_t i2c_error_count = 0U;
+
+
+4) DAN VAO /* USER CODE BEGIN PFP */
+------------------------------------
+static HAL_StatusTypeDef MPU6050_UserInit(void);
+static uint32_t Micros(void);
+
+
+5) DAN VAO /* USER CODE BEGIN 0 */
+----------------------------------
+/* Chuong 4: cau hinh MPU6050, DLPF va toc do mau 200 Hz.
+ * CONFIG=3: DLPF; SMPLRT_DIV=4 khi gyro output sau DLPF la 1 kHz.
+ * GYRO_CFG=0x08: +-500 deg/s; ACCEL_CFG=0: +-2 g. */
+static HAL_StatusTypeDef MPU6050_Write(uint8_t reg, uint8_t value)
+{
+    return HAL_I2C_Mem_Write(&hi2c1, MPU6050_ADDR, reg,
+                             I2C_MEMADD_SIZE_8BIT, &value, 1U, 100U);
+}
+
+static HAL_StatusTypeDef MPU6050_UserInit(void)
+{
+    uint8_t who = 0U;
+
+    if (HAL_I2C_Mem_Read(&hi2c1, MPU6050_ADDR, MPU6050_WHO_AM_I,
+                         I2C_MEMADD_SIZE_8BIT, &who, 1U, 100U) != HAL_OK)
+        return HAL_ERROR;
+    if (who != 0x68U)
+        return HAL_ERROR;
+
+    if (MPU6050_Write(MPU6050_PWR_MGMT_1, 0x01U) != HAL_OK) return HAL_ERROR;
+    HAL_Delay(50U);
+    if (MPU6050_Write(MPU6050_CONFIG,     0x03U) != HAL_OK) return HAL_ERROR;
+    if (MPU6050_Write(MPU6050_SMPLRT_DIV, 0x04U) != HAL_OK) return HAL_ERROR;
+    if (MPU6050_Write(MPU6050_GYRO_CFG,   0x08U) != HAL_OK) return HAL_ERROR;
+    if (MPU6050_Write(MPU6050_ACCEL_CFG,  0x00U) != HAL_OK) return HAL_ERROR;
+    return HAL_OK;
+}
+
+/* Chuong 10: timestamp microsecond bang DWT cycle counter.
+ * Phep tru uint32_t van dung khi counter bi wrap. */
+static uint32_t Micros(void)
+{
+    return DWT->CYCCNT / (HAL_RCC_GetHCLKFreq() / 1000000U);
+}
+
+/* Chuong 4 + 13: ISR ngan, chi chup encoder/timestamp va dat co.
+ * Khong tinh Kalman, khong printf trong interrupt. */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance == TIM2)
+    {
+        if (sample_tick_pending || i2c_dma_busy || imu_sample_ready)
+        {
+            deadline_miss_count++;
+        }
+        else
+        {
+            encoder_left_snapshot = (uint16_t)__HAL_TIM_GET_COUNTER(&htim3);
+            encoder_right_snapshot = (uint16_t)__HAL_TIM_GET_COUNTER(&htim4);
+            sample_timestamp_us = Micros();
+            sample_tick_pending = 1U;
+        }
+    }
+}
+
+/* Chuong 4: DMA xong moi cho phep main dung buffer. */
+void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *hi2c)
+{
+    if (hi2c->Instance == I2C1)
+    {
+        i2c_dma_busy = 0U;
+        imu_sample_ready = 1U;
+    }
+}
+
+void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c)
+{
+    if (hi2c->Instance == I2C1)
+    {
+        i2c_dma_busy = 0U;
+        imu_sample_ready = 0U;
+        i2c_error_count++;
+    }
+}
+
+
+6) DAN VAO /* USER CODE BEGIN 2 */
+----------------------------------
+/* Bat DWT de do dt chinh xac theo Chuong 10. */
+CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+DWT->CYCCNT = 0U;
+DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+
+if (MPU6050_UserInit() != HAL_OK)
+{
+    Error_Handler();
+}
+
+SFStudent_DefaultConfig(&sf_config);
+
+/* Chuong 5: dan ket qua calib accelerometer vao day. */
+sf_config.accel_bias_mps2[0] = 0.0f;
+sf_config.accel_bias_mps2[1] = 0.0f;
+sf_config.accel_bias_mps2[2] = 0.0f;
+sf_config.accel_scale[0] = 1.0f;
+sf_config.accel_scale[1] = 1.0f;
+sf_config.accel_scale[2] = 1.0f;
+
+/* Chuong 11: sua mapping nay theo cach gan MPU6050 tren xe. */
+sf_config.axis_index[0] = 0U;
+sf_config.axis_index[1] = 1U;
+sf_config.axis_index[2] = 2U;
+sf_config.axis_sign[0] = 1;
+sf_config.axis_sign[1] = 1;
+sf_config.axis_sign[2] = 1;
+
+/* Chuong 12, 17: BAT BUOC do va thay bang thong so xe that. */
+sf_config.wheel_radius_left_m = 0.0325f;
+sf_config.wheel_radius_right_m = 0.0325f;
+sf_config.wheel_track_m = 0.160f;
+sf_config.encoder_cpr_left = 1560.0f;
+sf_config.encoder_cpr_right = 1560.0f;
+sf_config.encoder_sign_left = 1;
+sf_config.encoder_sign_right = 1;
+
+if (!SFStudent_Init(&sf_config))
+{
+    Error_Handler();
+}
+
+HAL_TIM_Encoder_Start(&htim3, TIM_CHANNEL_ALL);
+HAL_TIM_Encoder_Start(&htim4, TIM_CHANNEL_ALL);
+HAL_TIM_Base_Start_IT(&htim2);
+
+
+7) DAN VAO TRONG while (1), GIUA USER CODE WHILE VA USER CODE 3
+----------------------------------------------------------------
+{
+    static uint32_t previous_timestamp_us = 0U;
+    static uint32_t last_good_sample_ms = 0U;
+
+    /* Main moi goi HAL DMA; TIM2 ISR duoc giu ngan. */
+    if (sample_tick_pending && !i2c_dma_busy)
+    {
+        sample_tick_pending = 0U;
+        i2c_dma_busy = 1U;
+        if (HAL_I2C_Mem_Read_DMA(&hi2c1, MPU6050_ADDR,
+                                 MPU6050_DATA_START,
+                                 I2C_MEMADD_SIZE_8BIT,
+                                 mpu6050_rx, sizeof(mpu6050_rx)) != HAL_OK)
+        {
+            i2c_dma_busy = 0U;
+            i2c_error_count++;
+        }
+    }
+
+    if (imu_sample_ready)
+    {
+        uint32_t now_us;
+        uint16_t enc_l;
+        uint16_t enc_r;
+        float dt_s;
+
+        /* Bien 32-bit doc/ghi atomic tren Cortex-M4. Tat IRQ de chup cung mot mau. */
+        __disable_irq();
+        imu_sample_ready = 0U;
+        now_us = sample_timestamp_us;
+        enc_l = encoder_left_snapshot;
+        enc_r = encoder_right_snapshot;
+        __enable_irq();
+
+        if (previous_timestamp_us == 0U)
+            dt_s = 1.0f / sf_config.sample_hz;
+        else
+            dt_s = (float)(now_us - previous_timestamp_us) * 1.0e-6f;
+        previous_timestamp_us = now_us;
+
+        SFStudent_ProcessRawMPU(mpu6050_rx, enc_l, enc_r, dt_s);
+        SFStudent_GetOutput(&sf_output);
+        last_good_sample_ms = HAL_GetTick();
+
+        /* Dung sf_output.roll_rad, pitch_rad, yaw_rad, x_m, y_m o day.
+         * Khi CALIBRATING: giu xe dung yen va KHONG cho motor chay.
+         * Khi FAULT: dung motor. */
+    }
+
+    /* Chuong 13: chi nuoi watchdog khi du lieu con moi va estimator khong fault. */
+    if ((sf_output.status != SF_STUDENT_FAULT) &&
+        ((HAL_GetTick() - last_good_sample_ms) < 100U))
+    {
+        HAL_IWDG_Refresh(&hiwdg);   /* Xoa dong nay neu CubeMX khong bat IWDG. */
+    }
+}
+
+
+Luu y:
+  - Trong 2 giay dau, dat xe tren mat phang va giu dung yen de calib gyro.
+  - yaw_rad khong co moc tuyet doi nen se drift dan (Chuong 3).
+  - Khong printf blocking trong vong 200 Hz. Neu can debug, gui UART DMA cham hon.
+  - Goc la radian; quang duong la metre; toc do la m/s.
